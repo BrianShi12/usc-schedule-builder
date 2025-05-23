@@ -2,14 +2,16 @@ from sqlalchemy import Column, Integer, String, ARRAY, DateTime, func, ForeignKe
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
+from flask_login import UserMixin
 
 Base = declarative_base()
 
-class User(Base):
+class User(Base, UserMixin):
     __tablename__ = "users"
-    id    = Column(Integer, primary_key=True)
-    email = Column(String, unique=True, nullable=False)
-    name  = Column(String)
+    id       = Column(Integer, primary_key=True)
+    oauth_id = Column(String, unique=True, nullable=False)  # Added for Google OAuth
+    email    = Column(String, unique=True, nullable=False)
+    name     = Column(String)
 
     schedules = relationship("SavedSchedule", back_populates="user")
 

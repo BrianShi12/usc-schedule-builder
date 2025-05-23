@@ -10,7 +10,11 @@ Base.metadata.create_all(bind=engine)
 session = SessionLocal()
 
 # 3) Add a user
-u = User(email="alice@example.com", name="Alice")
+u = User(
+    email="alice@example.com", 
+    name="Alice",
+    oauth_id="test123"  # Added this line for the new required field
+)
 session.add(u)
 session.commit()
 print(f"Created User: id={u.id}, email={u.email}")
