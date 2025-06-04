@@ -222,37 +222,52 @@ def create_app():
         all_valid_schedules = []
         seen_lecture_combinations = set()
         
+        # Debug logging
+        print("\n=== Schedule Generation Debug ===")
+        print(f"Received {len(courses_data)} courses")
+        
         # Get all lecture sections for each course
         course_lectures = {}
         course_discussions = {}
         
         for course in courses_data:
+            print(f"\nProcessing {course['published_course_id']}:")
             sections = get_sections_by_type(course)
+            print(f"Sections by type: {dict((k, len(v)) for k, v in sections.items())}")
+            
             course_id = course['published_course_id']
             course_lectures[course_id] = sections.get('Lec', [])
+            print(f"Found {len(course_lectures[course_id])} lecture sections")
+            
             # Combine discussions/labs/quiz sections
             other_sections = []
             for type_ in ['Dis', 'Lab', 'Qz']:
-                other_sections.extend(sections.get(type_, []))
+                sections_of_type = sections.get(type_, [])
+                other_sections.extend(sections_of_type)
+                print(f"Found {len(sections_of_type)} {type_} sections")
+                
             course_discussions[course_id] = other_sections
+            print(f"Total other sections: {len(course_discussions[course_id])}")
 
         # Generate all possible lecture combinations
         lecture_combinations = list(product(*[
             lectures for lectures in course_lectures.values() if lectures
         ]))
         
-        # Randomize combinations for variety
-        import random
-        random.shuffle(lecture_combinations)
+        print(f"\nGenerated {len(lecture_combinations)} possible lecture combinations")
         
         # Try each lecture combination
-        for lecture_combo in lecture_combinations:
+        for idx, lecture_combo in enumerate(lecture_combinations):
             if len(all_valid_schedules) >= max_schedules:
                 break
                 
+            print(f"\nTrying combination {idx + 1}:")
+            print("Lectures:", [f"{lec['type']} {lec['id']}" for lec in lecture_combo])
+            
             # Skip if we've seen this lecture combination
             lecture_key = tuple(sorted(lec['id'] for lec in lecture_combo))
             if lecture_key in seen_lecture_combinations:
+                print("Skipping duplicate lecture combination")
                 continue
                 
             # Check for conflicts between lectures
@@ -260,6 +275,7 @@ def create_app():
             for i, lec1 in enumerate(lecture_combo):
                 for lec2 in lecture_combo[i+1:]:
                     if has_time_conflict(lec1, lec2):
+                        print(f"Conflict found between {lec1['id']} and {lec2['id']}")
                         has_conflict = True
                         break
                 if has_conflict:
@@ -272,6 +288,7 @@ def create_app():
             current_schedule = list(lecture_combo)
             seen_lecture_combinations.add(lecture_key)
             
+            print("Adding discussions/labs...")
             # Add required discussions/labs
             for course_id, discussions in course_discussions.items():
                 for disc in discussions:
@@ -279,12 +296,15 @@ def create_app():
                     valid = True
                     for section in current_schedule:
                         if has_time_conflict(disc, section):
+                            print(f"Discussion {disc['id']} conflicts with {section['id']}")
                             valid = False
                             break
                     if valid:
+                        print(f"Added {disc['type']} {disc['id']}")
                         current_schedule.append(disc)
                         break  # Only add one discussion per course
             
+            print(f"Schedule {len(all_valid_schedules) + 1} complete with {len(current_schedule)} sections")
             all_valid_schedules.append(current_schedule)
             
         return all_valid_schedules[:max_schedules]
@@ -292,37 +312,94 @@ def create_app():
     @app.route("/schedules/generate", methods=["POST"])
     @login_required
     def generate_schedules():
-        data = request.get_json()
-        course_ids = data.get("courses")  # e.g. ["CSCI-570", "CSCI-585"]
-        
-        # Get course data from cache
-        db = next(get_db())
-        courses_data = []
-        
         try:
+            print("\n=== STARTING SCHEDULE GENERATION ===")
+            data = request.get_json()
+            course_ids = data.get("courses", [])
+            term_id = data.get("term_id")
+            
+            print(f"Raw request data: {data}")
+            print(f"Processing courses: {course_ids}")
+            print(f"Term ID: {term_id}")
+            
+            if not course_ids:
+                print("❌ No courses provided in request")
+                return jsonify({"error": "No courses provided"}), 400
+                
+            db = next(get_db())
+            schedules_data = []
+            
+            # Print database connection status
+            print("✓ Database connection established")
+            
             for course_id in course_ids:
                 dept = course_id.split('-')[0]
+                print(f"\nLooking up course: {course_id}")
+                
+                # Query the cache
                 cache_entry = db.query(CourseCache)\
-                               .filter_by(term_id=data["term_id"], 
-                                        department=dept)\
+                               .filter_by(term_id=term_id, department=dept)\
                                .first()
-                if cache_entry:
-                    course_data = next(
-                        (c for c in cache_entry.payload 
-                         if c["published_course_id"] == course_id),
-                        None
-                    )
-                    if course_data:
-                        courses_data.append(course_data)
-    
-            schedules = generate_diverse_schedules(courses_data)
+                
+                if not cache_entry:
+                    print(f"❌ No cache entry found for department: {dept}")
+                    continue
+                    
+                print(f"✓ Found cache entry for {dept}")
+                print(f"Cache payload structure:")
+                print(f"- Keys: {list(cache_entry.payload.keys())}")
+                print(f"- Number of courses: {len(cache_entry.payload['courses'])}")
+                print(f"- Looking for course_id: {course_id}")
+
+                # Find specific course
+                course_data = next(
+                    (c for c in cache_entry.payload['courses']
+                     if c['published_course_id'] == course_id),
+                    None
+                )
+                
+                if course_data:
+                    print(f"✓ Found course data for {course_id}")
+                    print(f"Course data keys: {list(course_data.keys())}")
+                    if 'sections' not in course_data:
+                        print(f"❌ No sections found for {course_id}")
+                        continue
+                        
+                    print(f"Found {len(course_data['sections'])} sections:")
+                    for section in course_data['sections']:
+                        print(f"- {section['type']} {section['id']}: "
+                              f"{section.get('day', 'No day')} "
+                              f"{section.get('start_time', 'No time')}-"
+                              f"{section.get('end_time', 'No time')}")
+                    
+                    schedules_data.append(course_data)
+
+            if not schedules_data:
+                print("❌ No valid courses found in cache")
+                return jsonify({"error": "No valid courses found"}), 404
             
-            return jsonify({
-                "count": len(schedules),
-                "schedules": schedules
-            })
+            print(f"\n✓ Found data for {len(schedules_data)} courses")
+            print("Generating schedules...")
+            
+            generated_schedules = generate_diverse_schedules(schedules_data)
+            print(f"✓ Generated {len(generated_schedules)} possible schedules")
+            
+            response_data = {
+                "count": len(generated_schedules),
+                "schedules": generated_schedules
+            }
+            print("\n=== SCHEDULE GENERATION COMPLETE ===")
+            return jsonify(response_data)
+                
+        except Exception as e:
+            print(f"❌ Error in schedule generation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
         finally:
-            db.close()
+            if 'db' in locals():
+                db.close()
+                print("✓ Database connection closed")
 
     @app.route("/schedules/save", methods=["POST"])
     @login_required
@@ -331,11 +408,19 @@ def create_app():
         db = next(get_db())
         try:
             data = request.get_json()
+            print("Save schedule request data:", data)  # Debug log
+            
+            if not data:
+                return jsonify({"error": "No data provided"}), 400
+                
+            if "sections" not in data:
+                return jsonify({"error": "No sections provided"}), 400
+
             schedule = SavedSchedule(
                 user_id=current_user.id,
-                term_id=data["term_id"],
-                name=data.get("name", "My Schedule"),  # Default name if none provided
-                sections=data["sections"]  # List of CRNs
+                term_id=data.get("term_id", 20251),  # Default to Spring 2025
+                name=data.get("name", "My Schedule"),
+                sections=data["sections"]
             )
             db.add(schedule)
             db.commit()
@@ -343,8 +428,13 @@ def create_app():
             return jsonify({
                 "id": schedule.id,
                 "name": schedule.name,
+                "term_id": schedule.term_id,
                 "sections": schedule.sections
             })
+        except Exception as e:
+            print(f"Error saving schedule: {str(e)}")
+            db.rollback()
+            return jsonify({"error": "Failed to save schedule"}), 500
         finally:
             db.close()
 
