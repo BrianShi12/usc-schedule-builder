@@ -408,23 +408,22 @@ def create_app():
         db = next(get_db())
         try:
             data = request.get_json()
-            print("Save schedule request data:", data)  # Debug log
+            print("Save schedule request data:", data)
             
-            if not data:
-                return jsonify({"error": "No data provided"}), 400
-                
-            if "sections" not in data:
+            if not data or "sections" not in data:
                 return jsonify({"error": "No sections provided"}), 400
 
+            # Save schedule with section IDs directly
             schedule = SavedSchedule(
                 user_id=current_user.id,
-                term_id=data.get("term_id", 20251),  # Default to Spring 2025
+                term_id=data.get("term_id", 20251),
                 name=data.get("name", "My Schedule"),
-                sections=data["sections"]
+                sections=data["sections"]  # sections are already IDs
             )
             db.add(schedule)
             db.commit()
             
+            # Return response with basic info
             return jsonify({
                 "id": schedule.id,
                 "name": schedule.name,
@@ -441,18 +440,56 @@ def create_app():
     @app.route("/schedules/", methods=["GET"])
     @login_required
     def list_saved_schedules():
-        """List all saved schedules for current user"""
         db = next(get_db())
         try:
             schedules = db.query(SavedSchedule)\
                          .filter_by(user_id=current_user.id)\
                          .all()
-            return jsonify([{
-                "id": s.id,
-                "name": s.name,
-                "term_id": s.term_id,
-                "sections": s.sections
-            } for s in schedules])
+        
+            response_data = []
+            for schedule in schedules:
+                print(f"Processing schedule {schedule.id} with sections: {schedule.sections}")
+                
+                # Get the cache entry for this term
+                cache_entry = db.query(CourseCache)\
+                               .filter_by(term_id=schedule.term_id, department="CSCI")\
+                               .first()
+                
+                if not cache_entry:
+                    print(f"No cache entry found for term {schedule.term_id}")
+                    continue
+                
+                # Find full section details
+                section_details = []
+                for section_id in schedule.sections:
+                    section_id_str = str(section_id)  # Convert to string for comparison
+                    print(f"Looking for section: {section_id_str}")
+                    
+                    for course in cache_entry.payload['courses']:
+                        for section in course.get('sections', []):
+                            if str(section['id']) == section_id_str:  # Compare strings
+                                print(f"Found section {section_id} in {course['published_course_id']}")
+                                section_details.append({
+                                    'id': section['id'],
+                                    'type': section['type'],
+                                    'day': section['day'],
+                                    'start_time': section['start_time'],
+                                    'end_time': section['end_time'],
+                                    'location': section.get('location', 'TBA'),
+                                    'instructors': section.get('instructors', [])
+                                })
+                                break
+            
+                formatted_schedule = {
+                    "id": schedule.id,
+                    "name": schedule.name,
+                    "term_id": schedule.term_id,
+                    "sections": section_details  # This will now contain the full section details
+                }
+                print(f"Formatted schedule with {len(section_details)} sections")
+                response_data.append(formatted_schedule)
+                
+            return jsonify(response_data)
         finally:
             db.close()
 
