@@ -9,6 +9,7 @@ from db import SessionLocal
 from itertools import combinations, product
 from typing import List, Dict
 from datetime import datetime, time
+import random
 
 load_dotenv()
 
@@ -218,97 +219,115 @@ def create_app():
         return sections_by_type
 
     def generate_diverse_schedules(courses_data: list, max_schedules: int = 15) -> list:
-        """Generate schedules prioritizing different lecture combinations"""
+        """Generate schedules prioritizing different lecture combinations with randomness."""
         all_valid_schedules = []
-        seen_lecture_combinations = set()
-        
-        # Debug logging
+        seen_combinations = set()
+
         print("\n=== Schedule Generation Debug ===")
         print(f"Received {len(courses_data)} courses")
-        
-        # Get all lecture sections for each course
-        course_lectures = {}
-        course_discussions = {}
-        
+
+        # Group sections by course and type
+        course_sections = {}
+        lecture_combinations = []
+
         for course in courses_data:
-            print(f"\nProcessing {course['published_course_id']}:")
-            sections = get_sections_by_type(course)
-            print(f"Sections by type: {dict((k, len(v)) for k, v in sections.items())}")
-            
             course_id = course['published_course_id']
-            course_lectures[course_id] = sections.get('Lec', [])
-            print(f"Found {len(course_lectures[course_id])} lecture sections")
+            sections = get_sections_by_type(course)
             
-            # Combine discussions/labs/quiz sections
-            other_sections = []
-            for type_ in ['Dis', 'Lab', 'Qz']:
-                sections_of_type = sections.get(type_, [])
-                other_sections.extend(sections_of_type)
-                print(f"Found {len(sections_of_type)} {type_} sections")
+            # Add course_id to each section
+            for section_type in sections:
+                for section in sections[section_type]:
+                    section['course_id'] = course_id  # Add this line
                 
-            course_discussions[course_id] = other_sections
-            print(f"Total other sections: {len(course_discussions[course_id])}")
+            course_sections[course_id] = {
+                'Lec': sections.get('Lec', []),
+                'Dis': sections.get('Dis', []),
+                'Lab': sections.get('Lab', []),
+                'Qz': sections.get('Qz', [])
+            }
+            print(f"\nProcessing {course_id}:")
+            for section_type, sections_list in course_sections[course_id].items():
+                print(f"Found {len(sections_list)} {section_type} sections")
+
+            # Collect lecture sections for combination generation
+            lecture_combinations.append(course_sections[course_id]['Lec'])
 
         # Generate all possible lecture combinations
-        lecture_combinations = list(product(*[
-            lectures for lectures in course_lectures.values() if lectures
-        ]))
-        
-        print(f"\nGenerated {len(lecture_combinations)} possible lecture combinations")
-        
-        # Try each lecture combination
-        for idx, lecture_combo in enumerate(lecture_combinations):
-            if len(all_valid_schedules) >= max_schedules:
-                break
-                
-            print(f"\nTrying combination {idx + 1}:")
-            print("Lectures:", [f"{lec['type']} {lec['id']}" for lec in lecture_combo])
-            
-            # Skip if we've seen this lecture combination
-            lecture_key = tuple(sorted(lec['id'] for lec in lecture_combo))
-            if lecture_key in seen_lecture_combinations:
-                print("Skipping duplicate lecture combination")
-                continue
-                
-            # Check for conflicts between lectures
+        all_lecture_combinations = list(product(*lecture_combinations))
+        print(f"\nGenerated {len(all_lecture_combinations)} lecture combinations")
+
+        # Shuffle lecture combinations for randomness
+        random.shuffle(all_lecture_combinations)
+
+        # Cycle through lecture combinations evenly
+        lecture_index = 0
+        while len(all_valid_schedules) < max_schedules:
+            lecture_combo = all_lecture_combinations[lecture_index]
+            lecture_index = (lecture_index + 1) % len(all_lecture_combinations)  # Cycle through lectures
+
+            print("\nTrying lecture combination:")
+            for lec in lecture_combo:
+                print(f"- Lec {lec['id']}: {lec.get('day', 'TBA')} {lec.get('start_time', 'TBA')}-{lec.get('end_time', 'TBA')}")
+
+            # Check if lectures conflict
             has_conflict = False
             for i, lec1 in enumerate(lecture_combo):
                 for lec2 in lecture_combo[i+1:]:
                     if has_time_conflict(lec1, lec2):
-                        print(f"Conflict found between {lec1['id']} and {lec2['id']}")
                         has_conflict = True
                         break
-                if has_conflict:
-                    break
-                    
-            if has_conflict:
-                continue
-                
-            # Find valid discussion/lab combinations
-            current_schedule = list(lecture_combo)
-            seen_lecture_combinations.add(lecture_key)
-            
-            print("Adding discussions/labs...")
-            # Add required discussions/labs
-            for course_id, discussions in course_discussions.items():
-                for disc in discussions:
-                    # Check if discussion conflicts with any current sections
-                    valid = True
-                    for section in current_schedule:
-                        if has_time_conflict(disc, section):
-                            print(f"Discussion {disc['id']} conflicts with {section['id']}")
-                            valid = False
-                            break
-                    if valid:
-                        print(f"Added {disc['type']} {disc['id']}")
-                        current_schedule.append(disc)
-                        break  # Only add one discussion per course
-            
-            print(f"Schedule {len(all_valid_schedules) + 1} complete with {len(current_schedule)} sections")
-            all_valid_schedules.append(current_schedule)
-            
-        return all_valid_schedules[:max_schedules]
 
+            if has_conflict:
+                print("Lecture combination has conflicts, skipping")
+                continue
+
+            # Generate multiple schedules for the same lecture combination
+            for _ in range(3):  # Try up to 3 variations per lecture combination
+                if len(all_valid_schedules) >= max_schedules:
+                    break
+
+                # Start with lectures
+                current_schedule = list(lecture_combo)
+
+                # Add other sections for each course
+                schedule_valid = True
+                for course_id, sections in course_sections.items():
+                    # Get the lecture for this course
+                    course_lecture = next((lec for lec in lecture_combo if lec in sections['Lec']), None)
+                    if not course_lecture:
+                        continue
+
+                    # Try adding discussions, labs, quizzes
+                    for section_type in ['Dis', 'Lab', 'Qz']:
+                        if sections[section_type]:
+                            # Randomize the order of sections for diversity
+                            random_sections = random.sample(sections[section_type], len(sections[section_type]))
+                            section_added = False
+                            for section in random_sections:
+                                # Check if section conflicts with current schedule
+                                if not any(has_time_conflict(section, existing) for existing in current_schedule):
+                                    current_schedule.append(section)
+                                    section_added = True
+                                    print(f"Added {section_type} {section['id']} for {course_id}")
+                                    break
+
+                            if not section_added:
+                                print(f"Could not find valid {section_type} for {course_id}")
+                                schedule_valid = False
+                                break
+
+                if schedule_valid:
+                    schedule_key = tuple(sorted(section['id'] for section in current_schedule))
+                    if schedule_key not in seen_combinations:
+                        seen_combinations.add(schedule_key)
+                        all_valid_schedules.append(current_schedule)
+                        print(f"\n✓ Found valid schedule {len(all_valid_schedules)}:")
+                        for section in current_schedule:
+                            print(f"- {section['type']} {section['id']}: {section.get('day', 'TBA')} {section.get('start_time', 'TBA')}-{section.get('end_time', 'TBA')}")
+
+        print(f"\nGenerated {len(all_valid_schedules)} valid schedules")
+        return all_valid_schedules
+    
     @app.route("/schedules/generate", methods=["POST"])
     @login_required
     def generate_schedules():
@@ -413,12 +432,15 @@ def create_app():
             if not data or "sections" not in data:
                 return jsonify({"error": "No sections provided"}), 400
 
-            # Save schedule with section IDs directly
+            # Extract just the section IDs from the section objects
+            section_ids = [int(section['id']) for section in data['sections']]
+            
+            # Save schedule with section IDs
             schedule = SavedSchedule(
                 user_id=current_user.id,
                 term_id=data.get("term_id", 20251),
                 name=data.get("name", "My Schedule"),
-                sections=data["sections"]  # sections are already IDs
+                sections=section_ids  # Now just an array of integers
             )
             db.add(schedule)
             db.commit()
@@ -462,12 +484,12 @@ def create_app():
                 # Find full section details
                 section_details = []
                 for section_id in schedule.sections:
-                    section_id_str = str(section_id)  # Convert to string for comparison
+                    section_id_str = str(section_id)
                     print(f"Looking for section: {section_id_str}")
                     
                     for course in cache_entry.payload['courses']:
                         for section in course.get('sections', []):
-                            if str(section['id']) == section_id_str:  # Compare strings
+                            if str(section['id']) == section_id_str:
                                 print(f"Found section {section_id} in {course['published_course_id']}")
                                 section_details.append({
                                     'id': section['id'],
@@ -476,19 +498,19 @@ def create_app():
                                     'start_time': section['start_time'],
                                     'end_time': section['end_time'],
                                     'location': section.get('location', 'TBA'),
-                                    'instructors': section.get('instructors', [])
+                                    'instructors': section.get('instructors', []),
+                                    'course_id': course['published_course_id']  # Add this line
                                 })
                                 break
-            
-                formatted_schedule = {
-                    "id": schedule.id,
-                    "name": schedule.name,
-                    "term_id": schedule.term_id,
-                    "sections": section_details  # This will now contain the full section details
-                }
-                print(f"Formatted schedule with {len(section_details)} sections")
-                response_data.append(formatted_schedule)
-                
+        
+            formatted_schedule = {
+                "id": schedule.id,
+                "name": schedule.name,
+                "term_id": schedule.term_id,
+                "sections": section_details
+            }
+            print(f"Formatted schedule with {len(section_details)} sections")
+            response_data.append(formatted_schedule)
             return jsonify(response_data)
         finally:
             db.close()
