@@ -160,8 +160,8 @@ def create_app():
         """Check if two sections have overlapping times"""
         # Handle TBA times
         if not section1.get('start_time') or not section2.get('start_time'):
-            return False
-            
+            return False  # Treat TBA sections as non-conflicting
+        
         # Get days as lists
         days1 = parse_days(section1['day'])
         days2 = parse_days(section2['day'])
@@ -170,7 +170,7 @@ def create_app():
         common_days = set(days1) & set(days2)
         if not common_days:
             return False
-            
+    
         # Check times on overlapping days
         time1_start = parse_time(section1['start_time'])
         time1_end = parse_time(section1['end_time'])
@@ -180,7 +180,7 @@ def create_app():
         return (time1_start <= time2_end) and (time2_start <= time1_end)
 
     def get_sections_from_cache(db_session, term_id: int, courses: List[str]) -> Dict[str, List[Dict]]:
-        """Extract section data from CourseCache JSONB payload"""
+        """Extract section data from CourseCache JSONB payload, excluding TBA sections."""
         sections_by_course = {}
         
         for course in courses:
@@ -199,13 +199,19 @@ def create_app():
             # Extract sections for this specific course from the department payload
             course_data = next(
                 (c for c in cache_entry.payload['courses'] 
-                 if c['course_id'] == course),
+                 if c['published_course_id'] == course),
                 None
             )
             
             if course_data:
-                sections_by_course[course] = course_data['sections']
-        
+                # Filter out TBA sections
+                valid_sections = [
+                    section for section in course_data['sections']
+                    if section.get('start_time') and section.get('day')  # Exclude TBA sections
+                ]
+                
+                sections_by_course[course] = valid_sections
+    
         return sections_by_course
 
     def get_sections_by_type(course_data: dict) -> dict:
@@ -222,6 +228,7 @@ def create_app():
         """Generate schedules prioritizing different lecture combinations with randomness."""
         all_valid_schedules = []
         seen_combinations = set()
+        failed_combinations = set()  # Track lecture combinations that fail repeatedly
 
         print("\n=== Schedule Generation Debug ===")
         print(f"Received {len(courses_data)} courses")
@@ -237,7 +244,7 @@ def create_app():
             # Add course_id to each section
             for section_type in sections:
                 for section in sections[section_type]:
-                    section['course_id'] = course_id  # Add this line
+                    section['course_id'] = course_id
                 
             course_sections[course_id] = {
                 'Lec': sections.get('Lec', []),
@@ -245,11 +252,6 @@ def create_app():
                 'Lab': sections.get('Lab', []),
                 'Qz': sections.get('Qz', [])
             }
-            print(f"\nProcessing {course_id}:")
-            for section_type, sections_list in course_sections[course_id].items():
-                print(f"Found {len(sections_list)} {section_type} sections")
-
-            # Collect lecture sections for combination generation
             lecture_combinations.append(course_sections[course_id]['Lec'])
 
         # Generate all possible lecture combinations
@@ -261,9 +263,15 @@ def create_app():
 
         # Cycle through lecture combinations evenly
         lecture_index = 0
-        while len(all_valid_schedules) < max_schedules:
+        while len(all_valid_schedules) < max_schedules and lecture_index < len(all_lecture_combinations):
             lecture_combo = all_lecture_combinations[lecture_index]
-            lecture_index = (lecture_index + 1) % len(all_lecture_combinations)  # Cycle through lectures
+            lecture_index += 1  # Move to the next combination
+
+            # Skip failed combinations
+            lecture_combo_key = tuple(lec['id'] for lec in lecture_combo)
+            if lecture_combo_key in failed_combinations:
+                print(f"Skipping previously failed lecture combination: {lecture_combo_key}")
+                continue
 
             print("\nTrying lecture combination:")
             for lec in lecture_combo:
@@ -279,9 +287,11 @@ def create_app():
 
             if has_conflict:
                 print("Lecture combination has conflicts, skipping")
+                failed_combinations.add(lecture_combo_key)  # Mark combination as failed
                 continue
 
             # Generate multiple schedules for the same lecture combination
+            schedule_attempts = 0
             for _ in range(3):  # Try up to 3 variations per lecture combination
                 if len(all_valid_schedules) >= max_schedules:
                     break
@@ -297,22 +307,20 @@ def create_app():
                     if not course_lecture:
                         continue
 
-                    # Try adding discussions, labs, quizzes
+                    # Try adding discussions, labs, quizzes - FIXED ORDER
                     for section_type in ['Dis', 'Lab', 'Qz']:
                         if sections[section_type]:
-                            # Randomize the order of sections for diversity
+                            # Add required sections unconditionally
                             random_sections = random.sample(sections[section_type], len(sections[section_type]))
                             section_added = False
                             for section in random_sections:
-                                # Check if section conflicts with current schedule
                                 if not any(has_time_conflict(section, existing) for existing in current_schedule):
-                                    current_schedule.append(section)
+                                    current_schedule.append(section)  # Add the section
                                     section_added = True
-                                    print(f"Added {section_type} {section['id']} for {course_id}")
                                     break
 
-                            if not section_added:
-                                print(f"Could not find valid {section_type} for {course_id}")
+                            # Only mark invalid if this section type is required
+                            if not section_added and section_type in ['Dis']:  # Discussion sections are required
                                 schedule_valid = False
                                 break
 
@@ -324,6 +332,12 @@ def create_app():
                         print(f"\n✓ Found valid schedule {len(all_valid_schedules)}:")
                         for section in current_schedule:
                             print(f"- {section['type']} {section['id']}: {section.get('day', 'TBA')} {section.get('start_time', 'TBA')}-{section.get('end_time', 'TBA')}")
+                schedule_attempts += 1
+
+        # If no valid schedules were generated for this combination, mark it as failed
+        if schedule_attempts == 0:
+            print(f"Lecture combination failed: {lecture_combo_key}")
+            failed_combinations.add(lecture_combo_key)
 
         print(f"\nGenerated {len(all_valid_schedules)} valid schedules")
         return all_valid_schedules
@@ -346,59 +360,26 @@ def create_app():
                 return jsonify({"error": "No courses provided"}), 400
                 
             db = next(get_db())
-            schedules_data = []
-            
-            # Print database connection status
             print("✓ Database connection established")
             
-            for course_id in course_ids:
-                dept = course_id.split('-')[0]
-                print(f"\nLooking up course: {course_id}")
-                
-                # Query the cache
-                cache_entry = db.query(CourseCache)\
-                               .filter_by(term_id=term_id, department=dept)\
-                               .first()
-                
-                if not cache_entry:
-                    print(f"❌ No cache entry found for department: {dept}")
-                    continue
-                    
-                print(f"✓ Found cache entry for {dept}")
-                print(f"Cache payload structure:")
-                print(f"- Keys: {list(cache_entry.payload.keys())}")
-                print(f"- Number of courses: {len(cache_entry.payload['courses'])}")
-                print(f"- Looking for course_id: {course_id}")
-
-                # Find specific course
-                course_data = next(
-                    (c for c in cache_entry.payload['courses']
-                     if c['published_course_id'] == course_id),
-                    None
-                )
-                
-                if course_data:
-                    print(f"✓ Found course data for {course_id}")
-                    print(f"Course data keys: {list(course_data.keys())}")
-                    if 'sections' not in course_data:
-                        print(f"❌ No sections found for {course_id}")
-                        continue
-                        
-                    print(f"Found {len(course_data['sections'])} sections:")
-                    for section in course_data['sections']:
-                        print(f"- {section['type']} {section['id']}: "
-                              f"{section.get('day', 'No day')} "
-                              f"{section.get('start_time', 'No time')}-"
-                              f"{section.get('end_time', 'No time')}")
-                    
-                    schedules_data.append(course_data)
-
-            if not schedules_data:
+            # Use get_sections_from_cache to retrieve course data
+            sections_by_course = get_sections_from_cache(db, term_id, course_ids)
+            
+            if not sections_by_course:
                 print("❌ No valid courses found in cache")
                 return jsonify({"error": "No valid courses found"}), 404
             
-            print(f"\n✓ Found data for {len(schedules_data)} courses")
+            print(f"\n✓ Found data for {len(sections_by_course)} courses")
             print("Generating schedules...")
+            
+            # Convert sections_by_course to the format expected by generate_diverse_schedules
+            schedules_data = [
+                {
+                    "published_course_id": course_id,
+                    "sections": sections
+                }
+                for course_id, sections in sections_by_course.items()
+            ]
             
             generated_schedules = generate_diverse_schedules(schedules_data)
             print(f"✓ Generated {len(generated_schedules)} possible schedules")
@@ -470,27 +451,20 @@ def create_app():
         
             response_data = []
             for schedule in schedules:
-                print(f"Processing schedule {schedule.id} with sections: {schedule.sections}")
-                
-                # Get the cache entry for this term
                 cache_entry = db.query(CourseCache)\
                                .filter_by(term_id=schedule.term_id, department="CSCI")\
                                .first()
                 
                 if not cache_entry:
-                    print(f"No cache entry found for term {schedule.term_id}")
                     continue
                 
-                # Find full section details
+                # Reset section_details for each schedule
                 section_details = []
                 for section_id in schedule.sections:
                     section_id_str = str(section_id)
-                    print(f"Looking for section: {section_id_str}")
-                    
                     for course in cache_entry.payload['courses']:
                         for section in course.get('sections', []):
                             if str(section['id']) == section_id_str:
-                                print(f"Found section {section_id} in {course['published_course_id']}")
                                 section_details.append({
                                     'id': section['id'],
                                     'type': section['type'],
@@ -499,18 +473,18 @@ def create_app():
                                     'end_time': section['end_time'],
                                     'location': section.get('location', 'TBA'),
                                     'instructors': section.get('instructors', []),
-                                    'course_id': course['published_course_id']  # Add this line
-                                })
-                                break
-        
-            formatted_schedule = {
-                "id": schedule.id,
-                "name": schedule.name,
-                "term_id": schedule.term_id,
-                "sections": section_details
-            }
-            print(f"Formatted schedule with {len(section_details)} sections")
-            response_data.append(formatted_schedule)
+                                    'course_id': course['published_course_id']
+                            })
+                            # Remove break to ensure we find all sections
+
+                formatted_schedule = {
+                    "id": schedule.id,
+                    "name": schedule.name,
+                    "term_id": schedule.term_id,
+                    "sections": section_details
+                }
+                response_data.append(formatted_schedule)
+
             return jsonify(response_data)
         finally:
             db.close()
