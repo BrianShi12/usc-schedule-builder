@@ -419,7 +419,7 @@ def create_app():
             # Save schedule with section IDs
             schedule = SavedSchedule(
                 user_id=current_user.id,
-                term_id=data.get("term_id", 20251),
+                term_id=data.get("term_id", 20253),  # 
                 name=data.get("name", "My Schedule"),
                 sections=section_ids  # Now just an array of integers
             )
